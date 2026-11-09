@@ -69,5 +69,5 @@ linear_model = LinearSoundSpeed(1480.0, 0.016)
 env_A        = Environment(linear_model, seafloor)
 
 prob_A = ODEProblem(ray_rhs, u0, tspan, env_A) 
-sol  = solve(prob_A, Tsit5())
+sol = solve(prob_A, Tsit5(); saveat = 2e4)
 plot(sol[1, :], sol[2, :], sol[3, :], zflip=true, xlabel="X (m)", ylabel="Y (m)", zlabel="Depth Z (m)")
