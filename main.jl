@@ -31,6 +31,9 @@ function grad_c(model::AbstractSoundSpeed, x::SVector{3})
     return ForwardDiff.gradient(pos -> sound_speed(model, pos), x)
 end
 
+function hess_c(model::AbstractSoundSpeed, x::SVector{3})
+    return ForwardDiff.hessian(pos -> sound_speed(model, pos), x)
+end
 
 
 struct GriddedSoundSpeed{I} <: AbstractSoundSpeed
@@ -47,18 +50,30 @@ end
 function sound_speed(model::GriddedSoundSpeed, x::SVector{3})
     return model.itp(x[1], x[2], x[3])
 end
-
+function slowness_force(model::AbstractSoundSpeed, x::SVector{3})
+    c_val = sound_speed(model, x)
+    dc    = grad_c(model, x)
+    return -(1.0 / c_val^3) * dc
+end
 function ray_rhs(u, env, tau)
     x = SVector(u[1], u[2], u[3]) 
     p = SVector(u[4], u[5], u[6]) 
-    
+    q_theta = SVector(u[7], u[8], u[9]) 
+    q_phi = SVector(u[10], u[11], u[12])
+    P_theta = SVector(u[13], u[14], u[15])
+    P_phi = SVector(u[16], u[17], u[18])
     c_val = sound_speed(env.ssp, x)
     dc    = grad_c(env.ssp, x)
     
+    c3 = c_val^3
     dx = p
-    dp = -(1.0 / c_val^3) * dc
-    
-    return vcat(dx, dp)  
+    dp = slowness_force(env.ssp, x)
+    dq_theta = P_theta
+    dq_phi= P_phi
+    J_F = ForwardDiff.jacobian(pos -> slowness_force(env.ssp, pos), x)
+    dP_theta = J_F * q_theta
+    dP_phi  = J_F * q_phi
+    return vcat(dx, dp, dq_theta, dq_phi, dP_theta, dP_phi)  
 end
 
 seafloor = FlatBottom(200.0)
