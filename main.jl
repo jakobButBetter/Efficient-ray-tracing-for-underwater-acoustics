@@ -75,62 +75,118 @@ function launch(env, x0, theta, phi)
     return vcat(x0, p0, q_theta0, q_phi0, P_theta0, P_phi0)
 end
 
-seafloor = FlatBottom(200.0)
-linear_model = LinearSoundSpeed(1480.0, 0.016)
-x0 = SVector(0.0, 0.0, 20.0)
-
-theta, phi = 0.05, 0.0
-
-env_A = Environment(linear_model, seafloor)
-c_src = sound_speed(env_A.ssp, x0)
-
-u0 = launch(env_A, x0, theta, phi)
-
-tspan   = (0.0, 6.4)
-dt_save = 1e-2
-
-prob_A = ODEProblem(ray_rhs, u0, tspan, env_A)
-sol = solve(prob_A, Tsit5(); saveat = dt_save, reltol = 1e-10, abstol = 1e-12)
-
-# ------ Solution verifications ------
-g  = linear_model.g
-R  = c_src / (g * cos(theta))
-rc = R * sin(theta)
-zc = x0[3] - R * cos(theta)
-
-rng(s) = s[1, :] .* cos(phi) .+ s[2, :] .* sin(phi)
-
-function circle_err(s)
-    r, z = rng(s), s[3, :]
-    return maximum(abs.(sqrt.((r .- rc).^2 .+ (z .- zc).^2) .- R)) / R
-end
-println("1. circle residual (relative): ", circle_err(sol))
-
-ph = sol[4, :] .* cos(phi) .+ sol[5, :] .* sin(phi)
-pp = -sol[4, :] .* sin(phi) .+ sol[5, :] .* cos(phi)
-println("2. horizontal slowness drift: ", maximum(abs.(ph .- ph[1])) / abs(ph[1]))
-println("   sideways slowness:         ", maximum(abs.(pp)))
-
-eik = [norm(u[4:6]) * sound_speed(linear_model, SVector(u[1], u[2], u[3])) - 1 for u in sol.u]
-println("3. max | |p|c - 1 |: ", maximum(abs, eik))
-
-z = sol[3, :]
-i = argmax(z)
-println("4. turning depth: sim = ", z[i], ", exact = ", zc + R)
-println("   turning range: sim = ", rng(sol)[i], ", exact = ", rc)
-
-println("5. tolerance sweep")
-for tol in (1e-6, 1e-8, 1e-10, 1e-12)
-    s = solve(prob_A, Tsit5(); saveat = dt_save, reltol = tol, abstol = tol * 1e-2)
-    println("tol = $tol  circle residual = ", circle_err(s))
+function build_ensemble(prob_base, x0, angles)
+    pf = let x0 = x0, angles = angles
+        (prob, ctx) -> begin
+            th, ph = angles[ctx.sim_id]
+            u0_i = launch(prob.p, x0, th, ph)
+            remake(prob, u0 = u0_i)
+        end
+    end
+    return EnsembleProblem(prob_base; prob_func = pf, safetycopy = false)
 end
 
-# Plot A (u[4:6] = p, u[7:9] = q_theta, u[10:12] = q_phi)
-A = [dot(u[4:6], cross(u[7:9], u[10:12])) for u in sol.u]
-A_free = @. c_src * sol.t^2 * cos(theta)
-ratio  = abs.(A[2:end]) ./ A_free[2:end]
+if abspath(PROGRAM_FILE) == @__FILE__() || isinteractive()    
+    seafloor     = FlatBottom(200.0)
+    linear_model = LinearSoundSpeed(1480.0, 0.016)
+    x0           = SVector(0.0, 0.0, 150.0)
 
-plot(sol[1, 2:end], sol[3, 2:end];
-     line_z = 10 .* log10.(ratio), lw = 3, yflip = true,
-     xlabel = "x (m)", ylabel = "depth (m)", colorbar_title = "dB re free space")
-hline!([env_A.topo.max_depth], color = :black)
+    theta, phi = 0.05, 0.0
+
+    env_A = Environment(linear_model, seafloor)
+    c_src = sound_speed(env_A.ssp, x0)
+
+    u0      = launch(env_A, x0, theta, phi)
+    tspan   = (0.0, 6.4)
+    dt_save = 1e-2
+
+    prob_A = ODEProblem(ray_rhs, u0, tspan, env_A)
+    sol    = solve(prob_A, Tsit5(); saveat = dt_save, reltol = 1e-10, abstol = 1e-12)
+
+    thetas = range(-1, 1, length = 100)
+    phis   = [0.0]
+
+    angle_pairs = vec(collect(Iterators.product(thetas, phis)))
+    n_rays      = length(angle_pairs)
+
+    u0_base   = launch(env_A, x0, angle_pairs[1][1], angle_pairs[1][2])
+    prob_base = ODEProblem(ray_rhs, u0_base, tspan, env_A)
+
+    ens_prob = build_ensemble(prob_base, x0, angle_pairs)
+
+    ens_sol = solve(
+        ens_prob,
+        Tsit5(),
+        EnsembleThreads();
+        trajectories = n_rays,
+        saveat = dt_save,
+        reltol = 1e-10,
+        abstol = 1e-12
+    )
+
+    # ------  Single-Ray Solution Verifications ------
+    g  = linear_model.g
+    R  = c_src / (g * cos(theta))
+    rc = R * sin(theta)
+    zc = x0[3] - R * cos(theta)
+
+    rng(s) = s[1, :] .* cos(phi) .+ s[2, :] .* sin(phi)
+
+    function circle_err(s)
+        r, z = rng(s), s[3, :]
+        return maximum(abs.(sqrt.((r .- rc).^2 .+ (z .- zc).^2) .- R)) / R
+    end
+    println("1. circle residual (relative): ", circle_err(sol))
+
+    ph = sol[4, :] .* cos(phi) .+ sol[5, :] .* sin(phi)
+    pp = -sol[4, :] .* sin(phi) .+ sol[5, :] .* cos(phi)
+    println("2. horizontal slowness drift: ", maximum(abs.(ph .- ph[1])) / abs(ph[1]))
+    println("   sideways slowness:         ", maximum(abs.(pp)))
+
+    eik = [norm(u[4:6]) * sound_speed(linear_model, SVector(u[1], u[2], u[3])) - 1 for u in sol.u]
+    println("3. max | |p|c - 1 |: ", maximum(abs, eik))
+
+    z = sol[3, :]
+    i = argmax(z)
+    println("4. turning depth: sim = ", z[i], ", exact = ", zc + R)
+    println("   turning range: sim = ", rng(sol)[i], ", exact = ", rc)
+
+    println("5. tolerance sweep")
+    for tol in (1e-6, 1e-8, 1e-10, 1e-12)
+        s = solve(prob_A, Tsit5(); saveat = dt_save, reltol = tol, abstol = tol * 1e-2)
+        println("tol = $tol  circle residual = ", circle_err(s))
+    end
+
+    # ------ 4. Plot Single Ray (p1) and Ensemble Ray Fan (p2) ------
+    A = [dot(u[4:6], cross(u[7:9], u[10:12])) for u in sol.u]
+    A_free = @. c_src * sol.t^2 * cos(theta)
+    ratio  = abs.(A[2:end]) ./ A_free[2:end]
+
+    p1 = plot(sol[1, 2:end], sol[3, 2:end];
+            line_z = 10 .* log10.(ratio), lw = 3, yflip = true,
+            xlabel = "x (m)", ylabel = "depth (m)",
+            colorbar_title = "dB re free space", title = "Single Ray", legend = false)
+    hline!(p1, [env_A.topo.max_depth], color = :black, lw = 2)
+
+    p2 = plot(xlabel = "x (m)", ylabel = "depth (m)",
+            colorbar_title = "dB re free space", yflip = true,
+            legend = false, title = "Ensemble Ray Fan ($n_rays rays)")
+
+    for (idx, sol_i) in enumerate(ens_sol.u)
+
+        th, _ = angle_pairs[idx]
+        A_i = [dot(u[4:6], cross(u[7:9], u[10:12])) for u in sol_i.u]
+        A_free_i = @. c_src * sol_i.t^2 * cos(th)
+        
+        # Ensure lengths match before plotting
+        min_len = min(length(A_i) - 1, length(A_free_i) - 1)
+
+        ratio_i = abs.(A_i[2:end]) ./ A_free_i[2:end]
+
+        plot!(p2, sol_i[1, 2:min_len+1], sol_i[3, 2:min_len+1];
+            line_z = 10 .* log10.(ratio_i[1:min_len]), lw = 1.5)
+    end
+    hline!(p2, [env_A.topo.max_depth], color = :black, lw = 2)
+
+    display(plot(p1, p2, layout = (2, 1), size = (800, 700)))
+end
