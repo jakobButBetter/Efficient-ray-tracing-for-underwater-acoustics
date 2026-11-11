@@ -3,6 +3,7 @@ using ForwardDiff
 using Interpolations
 using DifferentialEquations
 using Plots
+using LinearAlgebra
 abstract type AbstractSoundSpeed end
 abstract type AbstractTopography end
 
@@ -76,13 +77,84 @@ function ray_rhs(u, env, tau)
     return vcat(dx, dp, dq_theta, dq_phi, dP_theta, dP_phi)  
 end
 
+function launch(env, x0, theta, phi)
+    c_src = sound_speed(env.ssp, x0)
+    t_hat(a, b) = SVector(cos(a) * cos(b) , cos(a)*sin(b), sin(a))
+    p0    = t_hat(theta, phi) / c_src
+    dp_th = ForwardDiff.derivative(a -> t_hat(a, phi), theta) / c_src
+    dp_ph = ForwardDiff.derivative(b -> t_hat(theta, b), phi) / c_src
+    return SVector{18}(vcat(x0, p0, zeros(3), zeros(3), dp_th, dp_ph))
+end
+
 seafloor = FlatBottom(200.0)
-u0       = SVector(0.0, 0.0, 20.0, 1.0/1480.0, 0.0, 0.0)
-tspan    = (100, 1.4e7)
 
 linear_model = LinearSoundSpeed(1480.0, 0.016)
-env_A        = Environment(linear_model, seafloor)
+x0 = SVector(0.0, 0.0, 20.0)
+
+theta, phi = 0.05, 0.0
+
+env_A = Environment(linear_model, seafloor)
+u0 = launch(env_A, x0, theta, phi)
+
+tspan = (0, 1.4e7)
 
 prob_A = ODEProblem(ray_rhs, u0, tspan, env_A) 
-sol = solve(prob_A, Tsit5(); saveat = 2e4)
-plot(sol[1, :], sol[2, :], sol[3, :], zflip=true, xlabel="X (m)", ylabel="Y (m)", zlabel="Depth Z (m)")
+
+
+
+sol = solve(prob_A, Tsit5(); saveat = 2e4, reltol = 1e-10, abstol = 1e-12)
+
+
+# ------ Solution verifications ------
+# Exact solution 
+g  = linear_model.g
+R  = c_src / (g * cos(theta))          # circle radius
+rc = R * sin(theta)                    # centre, horizontal range from source
+zc = x0[3] - R * cos(theta)            # centre depth (equals -c0/g)
+
+# horizontal range along the launch azimuth, and depth
+rng(s) = s[1, :] .* cos(phi) .+ s[2, :] .* sin(phi)
+
+function circle_err(s)
+    r, z = rng(s), s[3, :]
+    return maximum(abs.(sqrt.((r .- rc).^2 .+ (z .- zc).^2) .- R)) / R
+end
+println("1. circle residual (relative): ", circle_err(sol))
+
+
+ph = sol[4, :] .* cos(phi) .+ sol[5, :] .* sin(phi)
+pp = -sol[4, :] .* sin(phi) .+ sol[5, :] .* cos(phi)
+println("2. horizontal slowness drift: ", maximum(abs.(ph .- ph[1])) / abs(ph[1]))
+println("   sideways slowness:         ", maximum(abs.(pp)))
+
+
+eik = [norm(u[4:6]) * sound_speed(linear_model, SVector(u[1], u[2], u[3])) - 1 for u in sol.u]
+println("3. max | |p|c - 1 |: ", maximum(abs, eik))
+
+
+# Only valid when the ray does not reach the bottom
+z    = sol[3, :]
+i    = argmax(z)
+println("4. turning depth: sim = ", z[i], ", exact = ", zc + R)
+println("   turning range: sim = ", rng(sol)[i], ", exact = ", rc)
+
+println("5. tolerance sweep")
+for tol in (1e-6, 1e-8, 1e-10, 1e-12)
+    s = solve(prob_A, Tsit5(); saveat = 2e4, reltol = tol, abstol = tol * 1e-2)
+    println("tol = $tol  circle residual = ", circle_err(s))
+end
+
+# Plot final solution
+# plot(sol[1, :], sol[2, :], sol[3, :], zflip=true, xlabel="X (m)", ylabel="Y (m)", zlabel="Depth Z (m)")
+
+# Plot A 
+A = [dot(u[4:6], cross(u[7:9], u[10:12])) for u in sol.u]
+A_free = @. sol.t^2 * cos(theta) / c_src^3      # same tau, homogeneous medium
+ratio  = abs.(A[2:end]) ./ A_free[2:end]
+tau    = sol.t[2:end]
+
+plot(sol[1, 2:end], sol[3, 2:end];
+     line_z = 10 .* log10.(ratio), lw = 3, yflip = true,
+     xlabel = "x (m)", ylabel = "depth (m)", colorbar_title = "dB re free space")
+hline!([env_A.topo.max_depth], color = :black)
+
