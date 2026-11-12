@@ -35,7 +35,7 @@ function hess_c(model::AbstractSoundSpeed, x::SVector{3})
     return ForwardDiff.hessian(pos -> sound_speed(model, pos), x)
 end
 
-function ray_rhs(u::SVector{18}, env, t)
+function ray_rhs(u::SVector{18}, env, t)# inline it since it is going to be called a lot
     x       = SVector(u[1],  u[2],  u[3])
     p       = SVector(u[4],  u[5],  u[6])
     q_theta = SVector(u[7],  u[8],  u[9])
@@ -55,7 +55,6 @@ function ray_rhs(u::SVector{18}, env, t)
 
     dP_theta = -(Hc * q_theta) / c + (dot(dc, q_theta) / c^2) * dc
     dP_phi   = -(Hc * q_phi)   / c + (dot(dc, q_phi)   / c^2) * dc
-
     return vcat(dx, dp, dq_theta, dq_phi, dP_theta, dP_phi)
 end
 
@@ -71,7 +70,6 @@ function launch(env, x0, theta, phi)
     q_phi0   = SVector(0.0, 0.0, 0.0)
     P_theta0 = dt_theta / c_src
     P_phi0   = dt_phi / c_src
-
     return vcat(x0, p0, q_theta0, q_phi0, P_theta0, P_phi0)
 end
 
@@ -86,7 +84,36 @@ function build_ensemble(prob_base, x0, angles)
     return EnsembleProblem(prob_base; prob_func = pf, safetycopy = false)
 end
 
-if abspath(PROGRAM_FILE) == @__FILE__() || isinteractive()    
+function reflect_vec(v::SVector{3}, n::SVector{3})
+    v - 2.0 * dot(v,n) * n
+end
+
+function plane_reflection_callback_constructor(normals, offsets; loss_parameter = 1.0)
+    N = [normalize(SVector{3}(n)) for n in normals]
+    
+    callbacks = map(zip(N, offsets)) do (n, offset)
+        condition(u, t, integrator) = dot(n, SVector(u[1], u[2], u[3])) - offset
+        
+        function affect!(integrator)
+            u       = integrator.u
+            x       = SVector(u[1],  u[2],  u[3])
+            p       = SVector(u[4],  u[5],  u[6])
+            q_theta = SVector(u[7],  u[8],  u[9])
+            q_phi   = SVector(u[10], u[11], u[12])
+            P_theta = SVector(u[13], u[14], u[15])
+            P_phi   = SVector(u[16], u[17], u[18])
+
+            p_new = reflect_vec(p, n)
+            integrator.u = vcat(x, p_new, q_theta, q_phi, P_theta, P_phi)
+        end
+        
+        ContinuousCallback(condition, affect!, nothing)
+    end
+    
+    return CallbackSet(callbacks...)
+end
+
+if abspath(PROGRAM_FILE) == @__FILE__() || isinteractive() #Only runs when this is main   
     seafloor     = FlatBottom(200.0)
     linear_model = LinearSoundSpeed(1480.0, 0.016)
     x0           = SVector(0.0, 0.0, 150.0)
@@ -95,12 +122,18 @@ if abspath(PROGRAM_FILE) == @__FILE__() || isinteractive()
 
     env_A = Environment(linear_model, seafloor)
     c_src = sound_speed(env_A.ssp, x0)
-
+    normals = [
+        SVector(0.0, 0.0, -1.0), 
+        SVector(0.0, 0.0,  1.0)  
+    ]
+    offsets = [0.0, env_A.topo.max_depth]
+    
+    cb = plane_reflection_callback_constructor(normals, offsets)
     u0      = launch(env_A, x0, theta, phi)
     tspan   = (0.0, 6.4)
     dt_save = 1e-2
 
-    prob_A = ODEProblem(ray_rhs, u0, tspan, env_A)
+    prob_A = ODEProblem(ray_rhs, u0, tspan, env_A; callback = cb)
     sol    = solve(prob_A, Tsit5(); saveat = dt_save, reltol = 1e-10, abstol = 1e-12)
 
     thetas = range(-1, 1, length = 100)
@@ -110,7 +143,7 @@ if abspath(PROGRAM_FILE) == @__FILE__() || isinteractive()
     n_rays      = length(angle_pairs)
 
     u0_base   = launch(env_A, x0, angle_pairs[1][1], angle_pairs[1][2])
-    prob_base = ODEProblem(ray_rhs, u0_base, tspan, env_A)
+    prob_base = ODEProblem(ray_rhs, u0_base, tspan, env_A; callback = cb)
 
     ens_prob = build_ensemble(prob_base, x0, angle_pairs)
 
