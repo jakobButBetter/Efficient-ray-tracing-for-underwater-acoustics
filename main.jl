@@ -133,17 +133,17 @@ if abspath(PROGRAM_FILE) == @__FILE__() || isinteractive() #Only runs when this 
     tspan   = (0.0, 6.4)
     dt_save = 1e-2
 
-    prob_A = ODEProblem(ray_rhs, u0, tspan, env_A; callback = cb)
+    prob_A = ODEProblem(ray_rhs, u0, tspan, env_A; callback = nothing)
     sol    = solve(prob_A, Tsit5(); saveat = dt_save, reltol = 1e-10, abstol = 1e-12)
 
-    thetas = range(-1, 1, length = 100)
+    thetas = range(0.0, 0.05, length = 5)
     phis   = [0.0]
 
     angle_pairs = vec(collect(Iterators.product(thetas, phis)))
     n_rays      = length(angle_pairs)
 
     u0_base   = launch(env_A, x0, angle_pairs[1][1], angle_pairs[1][2])
-    prob_base = ODEProblem(ray_rhs, u0_base, tspan, env_A; callback = cb)
+    prob_base = ODEProblem(ray_rhs, u0_base, tspan, env_A; callback = nothing)
 
     ens_prob = build_ensemble(prob_base, x0, angle_pairs)
 
@@ -184,11 +184,6 @@ if abspath(PROGRAM_FILE) == @__FILE__() || isinteractive() #Only runs when this 
     println("4. turning depth: sim = ", z[i], ", exact = ", zc + R)
     println("   turning range: sim = ", rng(sol)[i], ", exact = ", rc)
 
-    println("5. tolerance sweep")
-    for tol in (1e-6, 1e-8, 1e-10, 1e-12)
-        s = solve(prob_A, Tsit5(); saveat = dt_save, reltol = tol, abstol = tol * 1e-2)
-        println("tol = $tol  circle residual = ", circle_err(s))
-    end
 
     # ------ 4. Plot Single Ray (p1) and Ensemble Ray Fan (p2) ------
     A = [dot(u[4:6], cross(u[7:9], u[10:12])) for u in sol.u]
@@ -222,4 +217,49 @@ if abspath(PROGRAM_FILE) == @__FILE__() || isinteractive() #Only runs when this 
     hline!(p2, [env_A.topo.max_depth], color = :black, lw = 2)
 
     display(plot(p1, p2, layout = (2, 1), size = (800, 700)))
+
+
+    println("5. tolerance sweep")
+    tols       = [1e-6, 1e-8, 1e-10, 1e-12]
+    circ_errs  = Float64[]
+    for tol in tols
+        s = solve(prob_A, Tsit5(); saveat = dt_save, reltol = tol, abstol = tol * 1e-2)
+        err = circle_err(s)
+        push!(circ_errs, err)
+        println("tol = $tol  circle residual = ", err)
+    end
+
+    p3 = plot(tols, max.(circ_errs, eps());   # floor avoids zeros on a log axis
+            xscale = :log10, yscale = :log10,
+            marker = :circle, lw = 2, label = "circle residual",
+            xlabel = "reltol",
+            ylabel = "max relative circle error",
+            title  = "Circle error vs. solver tolerance",
+            xflip  = true,            # tighter tolerance to the right
+            legend = :topright)
+
+    # reference line: error proportional to tol (slope 1)
+    plot!(p3, tols, circ_errs[1] .* (tols ./ tols[1]);
+        ls = :dash, color = :gray, label = "proportional to tol")
+    display(p3)
+
+    # ------ Eikonal residual vs. ray parameter (time) ------
+    n_of(u)     = 1 / sound_speed(linear_model, SVector(u[1], u[2], u[3]))   # n(x) = 1/c
+    eik_abs(u)  = abs(norm(SVector(u[4], u[5], u[6])) - n_of(u))             # | |grad phi| - n |
+    eik_rel(u)  = eik_abs(u) / n_of(u)                                       # = ||p|c - 1|
+
+    res_abs = eik_abs.(sol.u)
+    res_rel = eik_rel.(sol.u)
+
+    p4 = plot(sol.t, max.(res_rel, eps());      # floor so zeros don't break the log axis
+            yscale = :log10, lw = 2, label = "relative: ||p|c - 1|",
+            xlabel = "ray parameter t (s)",
+            ylabel = "eikonal residual",
+            title  = "Eikonal residual: ||grad phi| - n(x)|",
+            legend = :bottomright)
+    plot!(p4, sol.t, max.(res_abs, eps());
+        lw = 2, ls = :dash, label = "absolute: ||p| - n|")
+    display(p4)
+
+
 end
