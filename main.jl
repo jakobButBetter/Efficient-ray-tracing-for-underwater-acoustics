@@ -22,20 +22,20 @@ struct Environment{S <: AbstractSoundSpeed, T <: AbstractTopography}
     topo::T
 end
 
-function sound_speed(model::LinearSoundSpeed, x::SVector{3})
+@inline function sound_speed(model::LinearSoundSpeed, x::SVector{3})
     z = x[3]
     return model.c0 + model.g * z
 end
 
-function grad_c(model::AbstractSoundSpeed, x::SVector{3})
+@inline function grad_c(model::AbstractSoundSpeed, x::SVector{3})
     return ForwardDiff.gradient(pos -> sound_speed(model, pos), x)
 end
 
-function hess_c(model::AbstractSoundSpeed, x::SVector{3})
+@inline function hess_c(model::AbstractSoundSpeed, x::SVector{3})
     return ForwardDiff.hessian(pos -> sound_speed(model, pos), x)
 end
 
-function ray_rhs(u::SVector{18}, env, t)# inline it since it is going to be called a lot
+@inline function ray_rhs(u::SVector{18}, env, t)# inline it since it is going to be called a lot
     x       = SVector(u[1],  u[2],  u[3])
     p       = SVector(u[4],  u[5],  u[6])
     q_theta = SVector(u[7],  u[8],  u[9])
@@ -136,7 +136,7 @@ if abspath(PROGRAM_FILE) == @__FILE__() || isinteractive() #Only runs when this 
     prob_A = ODEProblem(ray_rhs, u0, tspan, env_A; callback = nothing)
     sol    = solve(prob_A, Tsit5(); saveat = dt_save, reltol = 1e-10, abstol = 1e-12)
 
-    thetas = range(0.0, 0.05, length = 5)
+    thetas = range(0.0, 0.05, length = 2500)
     phis   = [0.0]
 
     angle_pairs = vec(collect(Iterators.product(thetas, phis)))
