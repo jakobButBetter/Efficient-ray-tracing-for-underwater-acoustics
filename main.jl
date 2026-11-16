@@ -48,7 +48,7 @@ function ray_rhs(u::SVector{18}, env, t)# inline it since it is going to be call
     Hc = hess_c(env.ssp, x)
 
     dx = c^2 * p
-    dp = -dc / c
+    dp = -dc * c * norm(p)^2
 
     dq_theta = 2 * c * dot(dc, q_theta) * p + c^2 * P_theta
     dq_phi   = 2 * c * dot(dc, q_phi)   * p + c^2 * P_phi
@@ -143,7 +143,7 @@ if abspath(PROGRAM_FILE) == @__FILE__() || isinteractive() #Only runs when this 
     n_rays      = length(angle_pairs)
 
     u0_base   = launch(env_A, x0, angle_pairs[1][1], angle_pairs[1][2])
-    prob_base = ODEProblem(ray_rhs, u0_base, tspan, env_A; callback = nothing)
+    prob_base = ODEProblem(ray_rhs, u0_base, tspan, env_A; callback = cb)
 
     ens_prob = build_ensemble(prob_base, x0, angle_pairs)
 
