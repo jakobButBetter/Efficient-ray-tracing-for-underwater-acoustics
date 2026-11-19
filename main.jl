@@ -24,7 +24,7 @@ end
 
 @inline function sound_speed(model::LinearSoundSpeed, x::SVector{3})
     z = x[3]
-    return model.c0 + model.g * z
+    return model.c0 + model.g * (z)
 end
 
 @inline function grad_c(model::AbstractSoundSpeed, x::SVector{3})
@@ -131,12 +131,13 @@ if abspath(PROGRAM_FILE) == @__FILE__() || isinteractive() #Only runs when this 
     cb = plane_reflection_callback_constructor(normals, offsets)
     u0      = launch(env_A, x0, theta, phi)
     tspan   = (0.0, 6.4)
+    # tspan   = (0.0, 0.8)
     dt_save = 1e-2
 
-    prob_A = ODEProblem(ray_rhs, u0, tspan, env_A; callback = nothing)
+    prob_A = ODEProblem(ray_rhs, u0, tspan, env_A; callback = cb)
     sol    = solve(prob_A, Tsit5(); saveat = dt_save, reltol = 1e-10, abstol = 1e-12)
 
-    thetas = range(0.0, 0.05, length = 2500)
+    thetas = range(0.0, 0.05, length = 500)
     phis   = [0.0]
 
     angle_pairs = vec(collect(Iterators.product(thetas, phis)))
@@ -163,13 +164,35 @@ if abspath(PROGRAM_FILE) == @__FILE__() || isinteractive() #Only runs when this 
     rc = R * sin(theta)
     zc = x0[3] - R * cos(theta)
 
-    rng(s) = s[1, :] .* cos(phi) .+ s[2, :] .* sin(phi)
+    function exact_position(t, theta)
+        alpha = 2 * atan( tanh((g * t / 2) - atanh(tan(theta / 2))) )
 
-    function circle_err(s)
-        r, z = rng(s), s[3, :]
-        return maximum(abs.(sqrt.((r .- rc).^2 .+ (z .- zc).^2) .- R)) / R
+        r = rc + R * sin(alpha)
+        return SVector(r * cos(phi), r * sin(phi), zc + R * cos(alpha))
     end
-    println("1. circle residual (relative): ", circle_err(sol))
+
+ 
+    # Absolute position error (m) at time t for a solve with relative tolerance tol
+    function circle_err(tol, t)
+        prob  = remake(prob_A; tspan = (0.0, t))
+        s     = solve(prob, Tsit5(); reltol = tol, abstol = tol * 1e-2, save_everystep = false)
+        x_num = SVector(s.u[end][1], s.u[end][2], s.u[end][3])
+        return norm(x_num - exact_position(t, theta))
+    end
+
+    t_check = 0.5   # must be before the first bottom reflection (about 0.77 s)
+
+    # Absolute position error (m) at the single time point t, for relative tolerance tol
+    function circle_err(tol, t)
+        s = solve(prob_A, Tsit5();
+                  reltol = tol, abstol = tol * 1e-2,
+                  tstops = [t], saveat = [t],
+                  save_start = false, save_end = false)
+        x_num = SVector(s.u[1][1], s.u[1][2], s.u[1][3])
+        return norm(x_num - exact_position(t, theta))
+    end
+
+    println("1. position error at t = $t_check s (m): ", circle_err(1e-10, t_check))
 
     ph = sol[4, :] .* cos(phi) .+ sol[5, :] .* sin(phi)
     pp = -sol[4, :] .* sin(phi) .+ sol[5, :] .* cos(phi)
@@ -182,8 +205,7 @@ if abspath(PROGRAM_FILE) == @__FILE__() || isinteractive() #Only runs when this 
     z = sol[3, :]
     i = argmax(z)
     println("4. turning depth: sim = ", z[i], ", exact = ", zc + R)
-    println("   turning range: sim = ", rng(sol)[i], ", exact = ", rc)
-
+    println("   turning range: sim = ", sol[1, i] * cos(phi) + sol[2, i] * sin(phi), ", exact = ", rc)
 
     # ------ 4. Plot Single Ray (p1) and Ensemble Ray Fan (p2) ------
     A = [dot(u[4:6], cross(u[7:9], u[10:12])) for u in sol.u]
@@ -219,23 +241,22 @@ if abspath(PROGRAM_FILE) == @__FILE__() || isinteractive() #Only runs when this 
     display(plot(p1, p2, layout = (2, 1), size = (800, 700)))
 
 
-    println("5. tolerance sweep")
-    tols       = [1e-6, 1e-8, 1e-10, 1e-12]
-    circ_errs  = Float64[]
+    println("5. tolerance sweep (t = $t_check s)")
+    tols      = [1e-2, 1e-4, 1e-6, 1e-8]
+    circ_errs = Float64[]
     for tol in tols
-        s = solve(prob_A, Tsit5(); saveat = dt_save, reltol = tol, abstol = tol * 1e-2)
-        err = circle_err(s)
+        err = circle_err(tol, t_check)
         push!(circ_errs, err)
-        println("tol = $tol  circle residual = ", err)
+        println("tol = $tol  position error (m) = ", err)
     end
 
-    p3 = plot(tols, max.(circ_errs, eps());   # floor avoids zeros on a log axis
+    p3 = plot(tols, max.(circ_errs, eps());
             xscale = :log10, yscale = :log10,
-            marker = :circle, lw = 2, label = "circle residual",
+            marker = :circle, lw = 2, label = "position error",
             xlabel = "reltol",
-            ylabel = "max relative circle error",
-            title  = "Circle error vs. solver tolerance",
-            xflip  = true,            # tighter tolerance to the right
+            ylabel = "position error at t = $t_check s (m)",
+            title  = "Position error vs. solver tolerance",
+            xflip  = true,
             legend = :topright)
 
     # reference line: error proportional to tol (slope 1)
