@@ -22,20 +22,20 @@ struct Environment{S <: AbstractSoundSpeed, T <: AbstractTopography}
     topo::T
 end
 
-function sound_speed(model::LinearSoundSpeed, x::SVector{3})
+@inline function sound_speed(model::LinearSoundSpeed, x::SVector{3})
     z = x[3]
-    return model.c0 + model.g * z
+    return model.c0 + model.g * (z)
 end
 
-function grad_c(model::AbstractSoundSpeed, x::SVector{3})
+@inline function grad_c(model::AbstractSoundSpeed, x::SVector{3})
     return ForwardDiff.gradient(pos -> sound_speed(model, pos), x)
 end
 
-function hess_c(model::AbstractSoundSpeed, x::SVector{3})
+@inline function hess_c(model::AbstractSoundSpeed, x::SVector{3})
     return ForwardDiff.hessian(pos -> sound_speed(model, pos), x)
 end
 
-function ray_rhs(u::SVector{18}, env, t)# inline it since it is going to be called a lot
+@inline function ray_rhs(u::SVector{18}, env, t)# inline it since it is going to be called a lot
     x       = SVector(u[1],  u[2],  u[3])
     p       = SVector(u[4],  u[5],  u[6])
     q_theta = SVector(u[7],  u[8],  u[9])
@@ -84,18 +84,31 @@ function build_ensemble(prob_base, x0, angles)
     return EnsembleProblem(prob_base; prob_func = pf, safetycopy = false)
 end
 
-function reflect_vec(v::SVector{3}, n::SVector{3})
-    v - 2.0 * dot(v,n) * n
+@inline function reflect_vec(v::SVector{3}, n::SVector{3})
+    return v - 2.0 * dot(v, n) * n
+end
+
+@inline function reflect_perturbed_slowness(
+    P::SVector{3},
+    q::SVector{3},
+    x_dot::SVector{3},
+    n::SVector{3},
+    c::Real,
+    dc::SVector{3}
+)
+    dt_dalpha = -dot(n, q) / dot(n, x_dot)
+    return reflect_vec(P, n) + (2.0 * (dot(n, dc) / c) * dt_dalpha) * n
 end
 
 function plane_reflection_callback_constructor(normals, offsets; loss_parameter = 1.0)
     N = [normalize(SVector{3}(n)) for n in normals]
     
     callbacks = map(zip(N, offsets)) do (n, offset)
-        condition(u, t, integrator) = dot(n, SVector(u[1], u[2], u[3])) - offset
+        @inline condition(u, t, integrator) = dot(n, SVector(u[1], u[2], u[3])) - offset
         
-        function affect!(integrator)
+        @inline function affect!(integrator)
             u       = integrator.u
+            env     = integrator.p
             x       = SVector(u[1],  u[2],  u[3])
             p       = SVector(u[4],  u[5],  u[6])
             q_theta = SVector(u[7],  u[8],  u[9])
@@ -103,8 +116,17 @@ function plane_reflection_callback_constructor(normals, offsets; loss_parameter 
             P_theta = SVector(u[13], u[14], u[15])
             P_phi   = SVector(u[16], u[17], u[18])
 
-            p_new = reflect_vec(p, n)
-            integrator.u = vcat(x, p_new, q_theta, q_phi, P_theta, P_phi)
+            c     = sound_speed(env.ssp, x)
+            dc    = grad_c(env.ssp, x)
+            x_dot = (c^2) * p
+
+            p_new       = reflect_vec(p, n)
+            q_theta_new = reflect_vec(q_theta, n)
+            q_phi_new   = reflect_vec(q_phi, n)
+            P_theta_new = reflect_perturbed_slowness(P_theta, q_theta, x_dot, n, c, dc)
+            P_phi_new   = reflect_perturbed_slowness(P_phi,   q_phi,   x_dot, n, c, dc)
+
+            integrator.u = vcat(x, p_new, q_theta_new, q_phi_new, P_theta_new, P_phi_new)
         end
         
         ContinuousCallback(condition, affect!, nothing)
@@ -131,12 +153,13 @@ if abspath(PROGRAM_FILE) == @__FILE__() || isinteractive() #Only runs when this 
     cb = plane_reflection_callback_constructor(normals, offsets)
     u0      = launch(env_A, x0, theta, phi)
     tspan   = (0.0, 6.4)
+    # tspan   = (0.0, 0.8)
     dt_save = 1e-2
 
-    prob_A = ODEProblem(ray_rhs, u0, tspan, env_A; callback = nothing)
+    prob_A = ODEProblem(ray_rhs, u0, tspan, env_A; callback = cb)
     sol    = solve(prob_A, Tsit5(); saveat = dt_save, reltol = 1e-10, abstol = 1e-12)
 
-    thetas = range(0.0, 0.05, length = 5)
+    thetas = range(0.0, 0.05, length = 500)
     phis   = [0.0]
 
     angle_pairs = vec(collect(Iterators.product(thetas, phis)))
@@ -163,13 +186,35 @@ if abspath(PROGRAM_FILE) == @__FILE__() || isinteractive() #Only runs when this 
     rc = R * sin(theta)
     zc = x0[3] - R * cos(theta)
 
-    rng(s) = s[1, :] .* cos(phi) .+ s[2, :] .* sin(phi)
+    function exact_position(t, theta)
+        alpha = 2 * atan( tanh((g * t / 2) - atanh(tan(theta / 2))) )
 
-    function circle_err(s)
-        r, z = rng(s), s[3, :]
-        return maximum(abs.(sqrt.((r .- rc).^2 .+ (z .- zc).^2) .- R)) / R
+        r = rc + R * sin(alpha)
+        return SVector(r * cos(phi), r * sin(phi), zc + R * cos(alpha))
     end
-    println("1. circle residual (relative): ", circle_err(sol))
+
+ 
+    # Absolute position error (m) at time t for a solve with relative tolerance tol
+    function circle_err(tol, t)
+        prob  = remake(prob_A; tspan = (0.0, t))
+        s     = solve(prob, Tsit5(); reltol = tol, abstol = tol * 1e-2, save_everystep = false)
+        x_num = SVector(s.u[end][1], s.u[end][2], s.u[end][3])
+        return norm(x_num - exact_position(t, theta))
+    end
+
+    t_check = 0.5   # must be before the first bottom reflection (about 0.77 s)
+
+    # Absolute position error (m) at the single time point t, for relative tolerance tol
+    function circle_err(tol, t)
+        s = solve(prob_A, Tsit5();
+                  reltol = tol, abstol = tol * 1e-2,
+                  tstops = [t], saveat = [t],
+                  save_start = false, save_end = false)
+        x_num = SVector(s.u[1][1], s.u[1][2], s.u[1][3])
+        return norm(x_num - exact_position(t, theta))
+    end
+
+    println("1. position error at t = $t_check s (m): ", circle_err(1e-10, t_check))
 
     ph = sol[4, :] .* cos(phi) .+ sol[5, :] .* sin(phi)
     pp = -sol[4, :] .* sin(phi) .+ sol[5, :] .* cos(phi)
@@ -182,8 +227,7 @@ if abspath(PROGRAM_FILE) == @__FILE__() || isinteractive() #Only runs when this 
     z = sol[3, :]
     i = argmax(z)
     println("4. turning depth: sim = ", z[i], ", exact = ", zc + R)
-    println("   turning range: sim = ", rng(sol)[i], ", exact = ", rc)
-
+    println("   turning range: sim = ", sol[1, i] * cos(phi) + sol[2, i] * sin(phi), ", exact = ", rc)
 
     # ------ 4. Plot Single Ray (p1) and Ensemble Ray Fan (p2) ------
     A = [dot(u[4:6], cross(u[7:9], u[10:12])) for u in sol.u]
@@ -219,23 +263,22 @@ if abspath(PROGRAM_FILE) == @__FILE__() || isinteractive() #Only runs when this 
     display(plot(p1, p2, layout = (2, 1), size = (800, 700)))
 
 
-    println("5. tolerance sweep")
-    tols       = [1e-6, 1e-8, 1e-10, 1e-12]
-    circ_errs  = Float64[]
+    println("5. tolerance sweep (t = $t_check s)")
+    tols      = [1e-2, 1e-4, 1e-6, 1e-8]
+    circ_errs = Float64[]
     for tol in tols
-        s = solve(prob_A, Tsit5(); saveat = dt_save, reltol = tol, abstol = tol * 1e-2)
-        err = circle_err(s)
+        err = circle_err(tol, t_check)
         push!(circ_errs, err)
-        println("tol = $tol  circle residual = ", err)
+        println("tol = $tol  position error (m) = ", err)
     end
 
-    p3 = plot(tols, max.(circ_errs, eps());   # floor avoids zeros on a log axis
+    p3 = plot(tols, max.(circ_errs, eps());
             xscale = :log10, yscale = :log10,
-            marker = :circle, lw = 2, label = "circle residual",
+            marker = :circle, lw = 2, label = "position error",
             xlabel = "reltol",
-            ylabel = "max relative circle error",
-            title  = "Circle error vs. solver tolerance",
-            xflip  = true,            # tighter tolerance to the right
+            ylabel = "position error at t = $t_check s (m)",
+            title  = "Position error vs. solver tolerance",
+            xflip  = true,
             legend = :topright)
 
     # reference line: error proportional to tol (slope 1)
