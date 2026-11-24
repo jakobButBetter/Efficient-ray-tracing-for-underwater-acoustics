@@ -84,18 +84,31 @@ function build_ensemble(prob_base, x0, angles)
     return EnsembleProblem(prob_base; prob_func = pf, safetycopy = false)
 end
 
-function reflect_vec(v::SVector{3}, n::SVector{3})
-    v - 2.0 * dot(v,n) * n
+@inline function reflect_vec(v::SVector{3}, n::SVector{3})
+    return v - 2.0 * dot(v, n) * n
+end
+
+@inline function reflect_perturbed_slowness(
+    P::SVector{3},
+    q::SVector{3},
+    x_dot::SVector{3},
+    n::SVector{3},
+    c::Real,
+    dc::SVector{3}
+)
+    dt_dalpha = -dot(n, q) / dot(n, x_dot)
+    return reflect_vec(P, n) + (2.0 * (dot(n, dc) / c) * dt_dalpha) * n
 end
 
 function plane_reflection_callback_constructor(normals, offsets; loss_parameter = 1.0)
     N = [normalize(SVector{3}(n)) for n in normals]
     
     callbacks = map(zip(N, offsets)) do (n, offset)
-        condition(u, t, integrator) = dot(n, SVector(u[1], u[2], u[3])) - offset
+        @inline condition(u, t, integrator) = dot(n, SVector(u[1], u[2], u[3])) - offset
         
-        function affect!(integrator)
+        @inline function affect!(integrator)
             u       = integrator.u
+            env     = integrator.p
             x       = SVector(u[1],  u[2],  u[3])
             p       = SVector(u[4],  u[5],  u[6])
             q_theta = SVector(u[7],  u[8],  u[9])
@@ -103,8 +116,17 @@ function plane_reflection_callback_constructor(normals, offsets; loss_parameter 
             P_theta = SVector(u[13], u[14], u[15])
             P_phi   = SVector(u[16], u[17], u[18])
 
-            p_new = reflect_vec(p, n)
-            integrator.u = vcat(x, p_new, q_theta, q_phi, P_theta, P_phi)
+            c     = sound_speed(env.ssp, x)
+            dc    = grad_c(env.ssp, x)
+            x_dot = (c^2) * p
+
+            p_new       = reflect_vec(p, n)
+            q_theta_new = reflect_vec(q_theta, n)
+            q_phi_new   = reflect_vec(q_phi, n)
+            P_theta_new = reflect_perturbed_slowness(P_theta, q_theta, x_dot, n, c, dc)
+            P_phi_new   = reflect_perturbed_slowness(P_phi,   q_phi,   x_dot, n, c, dc)
+
+            integrator.u = vcat(x, p_new, q_theta_new, q_phi_new, P_theta_new, P_phi_new)
         end
         
         ContinuousCallback(condition, affect!, nothing)
