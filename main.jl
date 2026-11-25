@@ -135,7 +135,7 @@ function plane_reflection_callback_constructor(normals, offsets; loss_parameter 
     
     return CallbackSet(callbacks...)
 end
-function flat_reflection_callback(g; count_reflection::Bool = true)
+function flat_reflection_callback(g; surface_tol = 1e-5)
     @inline condition(u, t, integrator) = g(SVector(u[1], u[2], u[3]))
 
     @inline function affect!(integrator)
@@ -148,8 +148,8 @@ function flat_reflection_callback(g; count_reflection::Bool = true)
         P_theta = SVector(u[13], u[14], u[15])
         P_phi   = SVector(u[16], u[17], u[18])
 
-        n_reflections = count_reflection ? u[19] + 1.0 : u[19]
-        n_caustics    = u[20]
+        n_surface = abs(x[3]) < surface_tol ? u[19] + 1.0 : u[19]
+        n_total   = u[20] + 1.0
 
         n     = normalize(ForwardDiff.gradient(g, x))
         c     = sound_speed(env.ssp, x)
@@ -162,10 +162,48 @@ function flat_reflection_callback(g; count_reflection::Bool = true)
         P_theta_new = reflect_perturbed_slowness(P_theta, q_theta, x_dot, n, c, dc)
         P_phi_new   = reflect_perturbed_slowness(P_phi,   q_phi,   x_dot, n, c, dc)
 
-        integrator.u = vcat(x, p_new, q_theta_new, q_phi_new, P_theta_new, P_phi_new,SVector(n_reflections, n_caustics))
+        integrator.u = vcat(x, p_new, q_theta_new, q_phi_new, P_theta_new, P_phi_new, n_surface, n_total)
     end
 
     return ContinuousCallback(condition, affect!, affect!)
+end
+function compute_phase_shifts(sol)
+    n          = length(sol.u)
+    n_surface  = Vector{Int}(undef, n)
+    n_caustics = Vector{Int}(undef, n)
+    phase      = Vector{Float64}(undef, n)
+
+    prev_sign = 0.0
+    c_count   = 0
+
+    for k in 1:n
+        u       = sol.u[k]
+        n_surf  = round(Int, u[19])
+        n_total = round(Int, u[20])
+
+        if k >= 2  # skip point source at t = 0 where A == 0
+            p       = SVector(u[4],  u[5],  u[6])
+            q_theta = SVector(u[7],  u[8],  u[9])
+            q_phi   = SVector(u[10], u[11], u[12])
+
+            A_raw  = dot(p, cross(q_theta, q_phi))
+            A_cont = isodd(n_total) ? -A_raw : A_raw
+
+            s = sign(A_cont)
+            if s != 0.0
+                if prev_sign != 0.0 && s != prev_sign
+                    c_count += 1
+                end
+                prev_sign = s
+            end
+        end
+
+        n_surface[k]  = n_surf
+        n_caustics[k] = c_count
+        phase[k]      = n_surf * pi - c_count * (pi / 2) # e^(-iωt) convention
+    end
+
+    return (; n_surface, n_caustics, phase)
 end
 if abspath(PROGRAM_FILE) == @__FILE__() || isinteractive() #Only runs when this is main   
     seafloor     = FlatBottom(200.0)
@@ -338,5 +376,5 @@ if abspath(PROGRAM_FILE) == @__FILE__() || isinteractive() #Only runs when this 
         lw = 2, ls = :dash, label = "absolute: ||p| - n|")
     display(p4)
 
-
+    
 end
