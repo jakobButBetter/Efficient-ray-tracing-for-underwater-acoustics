@@ -35,14 +35,13 @@ end
     return ForwardDiff.hessian(pos -> sound_speed(model, pos), x)
 end
 
-@inline function ray_rhs(u::SVector{18}, env, t)# inline it since it is going to be called a lot
+@inline function ray_rhs(u::SVector{20}, env, t)# inline it since it is going to be called a lot
     x       = SVector(u[1],  u[2],  u[3])
     p       = SVector(u[4],  u[5],  u[6])
     q_theta = SVector(u[7],  u[8],  u[9])
     q_phi   = SVector(u[10], u[11], u[12])
     P_theta = SVector(u[13], u[14], u[15])
     P_phi   = SVector(u[16], u[17], u[18])
-
     c  = sound_speed(env.ssp, x)
     dc = grad_c(env.ssp, x)
     Hc = hess_c(env.ssp, x)
@@ -55,7 +54,7 @@ end
 
     dP_theta = -(Hc * q_theta) / c + (dot(dc, q_theta) / c^2) * dc
     dP_phi   = -(Hc * q_phi)   / c + (dot(dc, q_phi)   / c^2) * dc
-    return vcat(dx, dp, dq_theta, dq_phi, dP_theta, dP_phi)
+    return vcat(dx, dp, dq_theta, dq_phi, dP_theta, dP_phi, SVector(0.0, 0.0))
 end
 
 function launch(env, x0, theta, phi)
@@ -70,7 +69,7 @@ function launch(env, x0, theta, phi)
     q_phi0   = SVector(0.0, 0.0, 0.0)
     P_theta0 = dt_theta / c_src
     P_phi0   = dt_phi / c_src
-    return vcat(x0, p0, q_theta0, q_phi0, P_theta0, P_phi0)
+    return vcat(x0, p0, q_theta0, q_phi0, P_theta0, P_phi0, SVector(0.0, 0.0))
 end
 
 function build_ensemble(prob_base, x0, angles)
@@ -115,7 +114,9 @@ function plane_reflection_callback_constructor(normals, offsets; loss_parameter 
             q_phi   = SVector(u[10], u[11], u[12])
             P_theta = SVector(u[13], u[14], u[15])
             P_phi   = SVector(u[16], u[17], u[18])
-
+            number_of_reflections = u[19]
+            number_of_reflections += 1
+            number_of_caustics = u[20]
             c     = sound_speed(env.ssp, x)
             dc    = grad_c(env.ssp, x)
             x_dot = (c^2) * p
@@ -126,7 +127,7 @@ function plane_reflection_callback_constructor(normals, offsets; loss_parameter 
             P_theta_new = reflect_perturbed_slowness(P_theta, q_theta, x_dot, n, c, dc)
             P_phi_new   = reflect_perturbed_slowness(P_phi,   q_phi,   x_dot, n, c, dc)
 
-            integrator.u = vcat(x, p_new, q_theta_new, q_phi_new, P_theta_new, P_phi_new)
+            integrator.u = vcat(x, p_new, q_theta_new, q_phi_new, P_theta_new, P_phi_new, SVector(number_of_reflections, number_of_caustics))
         end
         
         ContinuousCallback(condition, affect!, nothing)
@@ -134,7 +135,38 @@ function plane_reflection_callback_constructor(normals, offsets; loss_parameter 
     
     return CallbackSet(callbacks...)
 end
+function flat_reflection_callback(g; count_reflection::Bool = true)
+    @inline condition(u, t, integrator) = g(SVector(u[1], u[2], u[3]))
 
+    @inline function affect!(integrator)
+        u       = integrator.u
+        env     = integrator.p
+        x       = SVector(u[1],  u[2],  u[3])
+        p       = SVector(u[4],  u[5],  u[6])
+        q_theta = SVector(u[7],  u[8],  u[9])
+        q_phi   = SVector(u[10], u[11], u[12])
+        P_theta = SVector(u[13], u[14], u[15])
+        P_phi   = SVector(u[16], u[17], u[18])
+
+        n_reflections = count_reflection ? u[19] + 1.0 : u[19]
+        n_caustics    = u[20]
+
+        n     = normalize(ForwardDiff.gradient(g, x))
+        c     = sound_speed(env.ssp, x)
+        dc    = grad_c(env.ssp, x)
+        x_dot = (c^2) * p
+
+        p_new       = reflect_vec(p, n)
+        q_theta_new = reflect_vec(q_theta, n)
+        q_phi_new   = reflect_vec(q_phi, n)
+        P_theta_new = reflect_perturbed_slowness(P_theta, q_theta, x_dot, n, c, dc)
+        P_phi_new   = reflect_perturbed_slowness(P_phi,   q_phi,   x_dot, n, c, dc)
+
+        integrator.u = vcat(x, p_new, q_theta_new, q_phi_new, P_theta_new, P_phi_new,SVector(n_reflections, n_caustics))
+    end
+
+    return ContinuousCallback(condition, affect!, affect!)
+end
 if abspath(PROGRAM_FILE) == @__FILE__() || isinteractive() #Only runs when this is main   
     seafloor     = FlatBottom(200.0)
     linear_model = LinearSoundSpeed(1480.0, 0.016)
@@ -151,12 +183,14 @@ if abspath(PROGRAM_FILE) == @__FILE__() || isinteractive() #Only runs when this 
     offsets = [0.0, env_A.topo.max_depth]
     
     cb = plane_reflection_callback_constructor(normals, offsets)
+    g_waveguide(x) = min(x[3], env_A.topo.max_depth - x[3])
+    cb_func = flat_reflection_callback(g_waveguide)
     u0      = launch(env_A, x0, theta, phi)
     tspan   = (0.0, 6.4)
     # tspan   = (0.0, 0.8)
     dt_save = 1e-2
 
-    prob_A = ODEProblem(ray_rhs, u0, tspan, env_A; callback = cb)
+    prob_A = ODEProblem(ray_rhs, u0, tspan, env_A; callback = cb_func)
     sol    = solve(prob_A, Tsit5(); saveat = dt_save, reltol = 1e-10, abstol = 1e-12)
 
     thetas = range(0.0, 0.05, length = 500)
@@ -166,7 +200,7 @@ if abspath(PROGRAM_FILE) == @__FILE__() || isinteractive() #Only runs when this 
     n_rays      = length(angle_pairs)
 
     u0_base   = launch(env_A, x0, angle_pairs[1][1], angle_pairs[1][2])
-    prob_base = ODEProblem(ray_rhs, u0_base, tspan, env_A; callback = cb)
+    prob_base = ODEProblem(ray_rhs, u0_base, tspan, env_A; callback = cb_func)
 
     ens_prob = build_ensemble(prob_base, x0, angle_pairs)
 
