@@ -85,18 +85,10 @@ if abspath(PROGRAM_FILE) == @__FILE__() || isinteractive() #Only runs when this 
 
     println("1. position error at t = $t_check s (m): ", circle_err(1e-10, t_check))
 
-    ph = sol[4, :] .* cos(phi) .+ sol[5, :] .* sin(phi)
-    pp = -sol[4, :] .* sin(phi) .+ sol[5, :] .* cos(phi)
-    println("2. horizontal slowness drift: ", maximum(abs.(ph .- ph[1])) / abs(ph[1]))
-    println("   sideways slowness:         ", maximum(abs.(pp)))
-
+    
     eik = [norm(u[4:6]) * sound_speed(linear_model, SVector(u[1], u[2], u[3])) - 1 for u in sol.u]
-    println("3. max | |p|c - 1 |: ", maximum(abs, eik))
+    println("2. max | |p|c - 1 |: ", maximum(abs, eik))
 
-    z = sol[3, :]
-    i = argmax(z)
-    println("4. turning depth: sim = ", z[i], ", exact = ", zc + R)
-    println("   turning range: sim = ", sol[1, i] * cos(phi) + sol[2, i] * sin(phi), ", exact = ", rc)
 
     # ------ 4. Plot Single Ray (p1) and Ensemble Ray Fan (p2) ------
     A = [dot(u[4:6], cross(u[7:9], u[10:12])) for u in sol.u]
@@ -106,13 +98,13 @@ if abspath(PROGRAM_FILE) == @__FILE__() || isinteractive() #Only runs when this 
     p1 = plot(sol[1, 2:end], sol[3, 2:end];
             line_z = 10 .* log10.(ratio), lw = 3, yflip = true,
             xlabel = "x (m)", ylabel = "depth (m)",
-            colorbar_title = "dB re free space", title = "Single Ray", legend = false)
+            colorbar_title = "dB re free space", title = "Single Ray", legend = false, dpi=600)
     hline!(p1, [env_A.topo.max_depth], color = :black, lw = 2)
-
+    savefig("ray.png")
     p2 = plot(xlabel = "x (m)", ylabel = "depth (m)",
             colorbar_title = "dB re free space", yflip = true,
-            legend = false, title = "Ensemble Ray Fan ($n_rays rays)")
-
+            legend = false, title = "Ensemble Ray Fan ($n_rays rays)", dpi=600)
+    
     for (idx, sol_i) in enumerate(ens_sol.u)
 
         th, _ = angle_pairs[idx]
@@ -128,11 +120,11 @@ if abspath(PROGRAM_FILE) == @__FILE__() || isinteractive() #Only runs when this 
             line_z = 10 .* log10.(ratio_i[1:min_len]), lw = 1.5)
     end
     hline!(p2, [env_A.topo.max_depth], color = :black, lw = 2)
-
+    savefig("rays.png")
     display(plot(p1, p2, layout = (2, 1), size = (800, 700)))
 
 
-    println("5. tolerance sweep (t = $t_check s)")
+    println("3. tolerance sweep (t = $t_check s)")
     tols      = [1e-2, 1e-4, 1e-6, 1e-8]
     circ_errs = Float64[]
     for tol in tols

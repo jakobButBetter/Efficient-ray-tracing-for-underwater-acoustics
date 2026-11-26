@@ -24,7 +24,7 @@ end
 
 @inline function sound_speed(model::LinearSoundSpeed, x::SVector{3})
     z = x[3]
-    return model.c0 + model.g * (z)
+    return model.c0 + model.g * (z^1)
 end
 
 @inline function grad_c(model::AbstractSoundSpeed, x::SVector{3})
