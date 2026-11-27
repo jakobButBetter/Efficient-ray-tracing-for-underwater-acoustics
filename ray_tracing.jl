@@ -8,7 +8,12 @@ using LinearAlgebra
 abstract type AbstractSoundSpeed end
 abstract type AbstractTopography end
 
-struct LinearSoundSpeed <: AbstractSoundSpeed
+struct LinearSoundSpeed <: AbstractSoundSpeed    # circular arcs
+    c0::Float64
+    g::Float64
+end
+
+struct N2LinearSoundSpeed <: AbstractSoundSpeed  # parabolas
     c0::Float64
     g::Float64
 end
@@ -22,9 +27,11 @@ struct Environment{S <: AbstractSoundSpeed, T <: AbstractTopography}
     topo::T
 end
 
-@inline function sound_speed(model::LinearSoundSpeed, x::SVector{3})
-    z = x[3]
-    return model.c0 + model.g * (z^1)
+@inline sound_speed(m::LinearSoundSpeed, x::SVector{3}) = m.c0 + m.g * x[3]
+
+@inline function sound_speed(m::N2LinearSoundSpeed, x::SVector{3})
+    n2 = 1 / m.c0^2 - 2 * m.g * x[3] / m.c0^3
+    return 1 / sqrt(n2)
 end
 
 @inline function grad_c(model::AbstractSoundSpeed, x::SVector{3})

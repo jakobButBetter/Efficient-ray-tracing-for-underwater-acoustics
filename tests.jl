@@ -4,12 +4,14 @@ include("ray_tracing.jl")
 
 if abspath(PROGRAM_FILE) == @__FILE__() || isinteractive() #Only runs when this is main   
     seafloor     = FlatBottom(200.0)
-    linear_model = LinearSoundSpeed(1480.0, 0.016)
     x0           = SVector(0.0, 0.0, 150.0)
 
     theta, phi = 0.05, 0.0
 
-    env_A = Environment(linear_model, seafloor)
+    use_n2 = true
+    model  = use_n2 ? N2LinearSoundSpeed(1480.0, 1) : LinearSoundSpeed(1480.0, 1)
+    env_A  = Environment(model, seafloor)
+
     c_src = sound_speed(env_A.ssp, x0)
     normals = [
         SVector(0.0, 0.0, -1.0), 
@@ -21,8 +23,9 @@ if abspath(PROGRAM_FILE) == @__FILE__() || isinteractive() #Only runs when this 
     g_waveguide(x) = min(x[3], env_A.topo.max_depth - x[3])
     cb_func = flat_reflection_callback(g_waveguide)
     u0      = launch(env_A, x0, theta, phi)
-    tspan   = (0.0, 6.4)
-    # tspan   = (0.0, 0.8)
+    # tspan   = (0.0, 2.4)
+    # tspan   = (0.0, 6.4)
+    tspan   = (0.0, 0.4)
     dt_save = 1e-2
 
     prob_A = ODEProblem(ray_rhs, u0, tspan, env_A; callback = cb_func)
@@ -50,7 +53,7 @@ if abspath(PROGRAM_FILE) == @__FILE__() || isinteractive() #Only runs when this 
     )
 
     # ------  Single-Ray Solution Verifications ------
-    g  = linear_model.g
+    g  = model.g
     R  = c_src / (g * cos(theta))
     rc = R * sin(theta)
     zc = x0[3] - R * cos(theta)
@@ -71,22 +74,34 @@ if abspath(PROGRAM_FILE) == @__FILE__() || isinteractive() #Only runs when this 
         return norm(x_num - exact_position(t, theta))
     end
 
-    t_check = 0.5   # must be before the first bottom reflection (about 0.77 s)
+    t_check = 0.35   # must be before the first bottom reflection 
 
-    # Absolute position error (m) at the single time point t, for relative tolerance tol
-    function circle_err(tol, t)
-        s = solve(prob_A, Tsit5();
-                  reltol = tol, abstol = tol * 1e-2,
-                  tstops = [t], saveat = [t],
-                  save_start = false, save_end = false)
-        x_num = SVector(s.u[1][1], s.u[1][2], s.u[1][3])
-        return norm(x_num - exact_position(t, theta))
+    function exact_position_n2(t, theta)
+        c0, g = model.c0, model.g
+        b   = 2g / c0^3
+        ph  = cos(theta) / c_src          # conserved horizontal slowness
+        pz0 = sin(theta) / c_src
+
+        Q = 1.5 * b * t - 3 * ph^2 * pz0 - pz0^3
+        w = -2 * ph * sinh(asinh(Q / (2 * ph^3)) / 3)   # p_z(t)
+
+        r = 2 * ph * (pz0 - w) / b
+        z = x0[3] + (pz0^2 - w^2) / b
+        return SVector(r * cos(phi), r * sin(phi), z)
     end
 
-    println("1. position error at t = $t_check s (m): ", circle_err(1e-10, t_check))
+    function circle_err_n2(tol, t)
+        prob  = remake(prob_A; tspan = (0.0, t))
+        s     = solve(prob, Tsit5(); reltol = tol, abstol = tol * 1e-2, save_everystep = false)
+        x_num = SVector(s.u[end][1], s.u[end][2], s.u[end][3])
+        return norm(x_num - exact_position_n2(t, theta))
+    end
 
-    
-    eik = [norm(u[4:6]) * sound_speed(linear_model, SVector(u[1], u[2], u[3])) - 1 for u in sol.u]
+    println("1.a position error at t = $t_check s (m) for c linear: ", circle_err(1e-10, t_check))
+    println("1.b position error at t = $t_check s (m) for 1/c^2 linear: ", circle_err_n2(1e-10, t_check))
+
+
+    eik = [norm(u[4:6]) * sound_speed(model, SVector(u[1], u[2], u[3])) - 1 for u in sol.u]
     println("2. max | |p|c - 1 |: ", maximum(abs, eik))
 
 
@@ -128,7 +143,11 @@ if abspath(PROGRAM_FILE) == @__FILE__() || isinteractive() #Only runs when this 
     tols      = [1e-2, 1e-4, 1e-6, 1e-8]
     circ_errs = Float64[]
     for tol in tols
-        err = circle_err(tol, t_check)
+        if use_n2
+            err = circle_err_n2(tol, t_check)
+        else
+            err = circle_err(tol, t_check)
+        end
         push!(circ_errs, err)
         println("tol = $tol  position error (m) = ", err)
     end
@@ -148,7 +167,7 @@ if abspath(PROGRAM_FILE) == @__FILE__() || isinteractive() #Only runs when this 
     display(p3)
 
     # ------ Eikonal residual vs. ray parameter (time) ------
-    n_of(u)     = 1 / sound_speed(linear_model, SVector(u[1], u[2], u[3]))   # n(x) = 1/c
+    n_of(u)     = 1 / sound_speed(model, SVector(u[1], u[2], u[3]))   # n(x) = 1/c
     eik_abs(u)  = abs(norm(SVector(u[4], u[5], u[6])) - n_of(u))             # | |grad phi| - n |
     eik_rel(u)  = eik_abs(u) / n_of(u)                                       # = ||p|c - 1|
 
